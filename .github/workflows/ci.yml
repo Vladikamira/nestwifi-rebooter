@@ -49,8 +49,8 @@ jobs:
         platforms: linux/amd64,linux/arm64
         target: exporter
         tags: |
-          github.com/Vladikamira/nestwifi-exporter:latest
-          github.com/Vladikamira/nestwifi-exporter:${{ github.ref_name }}
+          github.com/vladikamira/nestwifi-exporter:latest
+          github.com/vladikamira/nestwifi-exporter:${{ github.ref_name }}
 
     - name: Build and push rebooter
       uses: docker/build-push-action@v5
@@ -60,8 +60,8 @@ jobs:
         platforms: linux/amd64,linux/arm64
         target: rebooter
         tags: |
-          github.com/Vladikamira/nestwifi-rebooter:latest
-          github.com/Vladikamira/nestwifi-rebooter:${{ github.ref_name }}
+          github.com/vladikamira/nestwifi-rebooter:latest
+          github.com/vladikamira/nestwifi-rebooter:${{ github.ref_name }}
 
     - name: Create Release
       uses: softprops/action-gh-release@v2
