@@ -1,0 +1,61 @@
+listen: ":9109"
+# Optional HomeGraph home ID to disambiguate identically named devices.
+home_id: ""
+
+# No per-device IPs: HomeGraph lists the expected Wifi routers and Points; the
+# LAN scan finds each by stable identity. Reboot requires all of them, exactly once.
+discovery:
+  enabled: true
+  cidrs: [192.168.86.0/24]
+  interval: 5m
+  timeout: 1500ms
+  concurrency: 32
+
+# Optional legacy mode: disable discovery and supply devices instead.
+# devices:
+#   - name: kitchen
+#     cloud_name: Kitchen Wifi
+#     ip: 192.168.86.32
+#     kind: wifi_point
+
+# Home Assistant via MQTT discovery (HA 2024.11+). Empty url disables MQTT.
+# The password comes from the optional Secret nestwifi-mqtt (key: password).
+mqtt:
+  url: ""                       # e.g. tcp://192.168.86.10:1883; later ssl://host:8883
+  username: ""
+  topic_prefix: nestwifi
+  discovery_prefix: homeassistant
+  tls:
+    ca_file: ""                 # e.g. /mqtt/ca.crt
+    cert_file: ""
+    key_file: ""
+    insecure_skip_verify: false
+
+exporter:
+  interval: 30s
+  timeout: 15s
+  concurrency: 4
+  cast: true
+  # Cloud telemetry: mesh link quality, AP state, clients, traffic. 0 disables.
+  cloud_interval: 2m
+
+rebooter:
+  # Five fields (minute hour day-of-month month day-of-week), no seconds.
+  schedule: "0 3 * * *"
+  timezone: Europe/Amsterdam
+  # From `rebooter -list-groups`. Required for reboot; the exporter uses the
+  # only group of the account when empty.
+  group_id: ""
+  state_dir: /state
+  wait_timeout: 10m
+  poll_interval: 5s
+  settle: 30s
+  quiet_settle: 3s
+  recovery_interval: 1m
+  # Minimum time between reboots of the same target (network or one point),
+  # including Home Assistant button presses.
+  min_interval: 1h
+  # Speed test this long after a successful network reboot; 0 disables.
+  speedtest_delay: 10m
+  # Clients Home Assistant may pause/prioritize (exact Google Home names or IDs).
+  managed_clients: []

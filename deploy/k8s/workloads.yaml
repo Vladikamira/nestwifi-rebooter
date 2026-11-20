@@ -1,0 +1,229 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nestwifi-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nestwifi-exporter
+  template:
+    metadata:
+      labels:
+        app: nestwifi-exporter
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: exporter
+          image: nestwifi-exporter:local
+          imagePullPolicy: IfNotPresent
+          args: ["-config", "/config/config.yaml"]
+          env:
+            - name: GOOGLE_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: nestwifi-auth
+                  key: email
+            - name: GOOGLE_MASTER_TOKEN_FILE
+              value: /secrets/master-token
+            - name: GOOGLE_ANDROID_ID
+              value: "0123456789abcdef"
+            - name: MQTT_PASSWORD_FILE
+              value: /mqtt/password
+          ports:
+            - name: http
+              containerPort: 9109
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 30
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: auth
+              mountPath: /secrets
+              readOnly: true
+            - name: mqtt
+              mountPath: /mqtt
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: nestwifi-config
+        - name: auth
+          secret:
+            secretName: nestwifi-auth
+            defaultMode: 0440
+        - name: mqtt
+          secret:
+            secretName: nestwifi-mqtt   # optional: password (+ ca.crt etc. for TLS)
+            optional: true
+            defaultMode: 0440
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nestwifi-rebooter-state
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 64Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nestwifi-rebooter
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: nestwifi-rebooter
+  template:
+    metadata:
+      labels:
+        app: nestwifi-rebooter
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: rebooter
+          image: nestwifi-rebooter:local
+          imagePullPolicy: IfNotPresent
+          # SAFE DEFAULT: read-only preflight. Add "-enable-reboot" only after setup.
+          args: ["-config", "/config/config.yaml"]
+          env:
+            - name: GOOGLE_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: nestwifi-auth
+                  key: email
+            - name: GOOGLE_MASTER_TOKEN_FILE
+              value: /secrets/master-token
+            - name: GOOGLE_ANDROID_ID
+              value: "0123456789abcdef"
+            - name: MQTT_PASSWORD_FILE
+              value: /mqtt/password
+          ports:
+            - name: http
+              containerPort: 9109
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            # Initial crash recovery may wait for a whole mesh reboot.
+            failureThreshold: 360
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: auth
+              mountPath: /secrets
+              readOnly: true
+            - name: mqtt
+              mountPath: /mqtt
+              readOnly: true
+            - name: state
+              mountPath: /state
+      volumes:
+        - name: config
+          configMap:
+            name: nestwifi-config
+        - name: auth
+          secret:
+            secretName: nestwifi-auth
+            defaultMode: 0440
+        - name: mqtt
+          secret:
+            secretName: nestwifi-mqtt   # optional: password (+ ca.crt etc. for TLS)
+            optional: true
+            defaultMode: 0440
+        - name: state
+          persistentVolumeClaim:
+            claimName: nestwifi-rebooter-state
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nestwifi-exporter
+  labels:
+    nestwifi-metrics: "true"
+spec:
+  selector:
+    app: nestwifi-exporter
+  ports:
+    - name: http
+      port: 9109
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nestwifi-rebooter
+  labels:
+    nestwifi-metrics: "true"
+spec:
+  # Keep the metrics target discoverable while /readyz reports recovery pending.
+  publishNotReadyAddresses: true
+  selector:
+    app: nestwifi-rebooter
+  ports:
+    - name: http
+      port: 9109
+      targetPort: http

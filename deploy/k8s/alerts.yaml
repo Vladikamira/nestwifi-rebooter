@@ -1,0 +1,57 @@
+# Optional: requires Prometheus Operator. Match the rule labels to your stack.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: nestwifi
+  namespace: nestwifi
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: nestwifi
+      rules:
+        - alert: NestWifiDiscoveryIncomplete
+          expr: nestwifi_discovery_complete == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Nest Wifi discovery cannot confirm the full mesh inventory"
+            description: "Check LAN routing/CIDRs, group_id, cloud authorization and unsupported or missing identities. Reboot is blocked."
+        - alert: NestWifiRestorePending
+          expr: nestwifi_rebooter_restore_pending == 1
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Nest Wifi settings still need restoration"
+            description: "Inspect rebooter logs, cloud authorization, PVC and device connectivity. Do not delete operation.json."
+        - alert: NestWifiDeviceUnavailable
+          expr: nestwifi_device_up == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Nest Wifi device unavailable: {{ $labels.device }}"
+        - alert: NestWifiMeshWeak
+          expr: nestwifi_mesh_speed_score < 50
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Weak mesh link: {{ $labels.device }} ({{ $value }})"
+        - alert: NestWifiCloudUnavailable
+          expr: nestwifi_cloud_up == 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Google Wifi cloud unavailable to the exporter"
+            description: "If it persists, the master token may be revoked; renew the nestwifi-auth Secret. Reboot is blocked meanwhile."
+        - alert: NestWifiWANOffline
+          expr: nestwifi_wan_online == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Nest Wifi reports the internet connection offline"

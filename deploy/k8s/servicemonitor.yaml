@@ -1,0 +1,17 @@
+# Optional: requires Prometheus Operator. Adjust labels for your installation.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: nestwifi
+  namespace: nestwifi
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      nestwifi-metrics: "true"
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
