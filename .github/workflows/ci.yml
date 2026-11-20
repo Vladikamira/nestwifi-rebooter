@@ -15,55 +15,53 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.27'
-    - name: Test
-      run: go test -v ./...
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+      - name: Test
+        run: go test -v ./...
 
   release:
     needs: test
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v4
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v4
+      - name: Build and push exporter
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          target: exporter
+          tags: |
+            vladikamira/nestwifi-exporter:latest
+            vladikamira/nestwifi-exporter:${{ github.ref_name }}
 
-    - name: Login to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build and push rebooter
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          target: rebooter
+          tags: |
+            vladikamira/nestwifi-rebooter:latest
+            vladikamira/nestwifi-rebooter:${{ github.ref_name }}
 
-    - name: Build and push exporter
-      uses: docker/build-push-action@v7
-      with:
-        context: .
-        push: true
-        platforms: linux/amd64,linux/arm64
-        target: exporter
-        tags: |
-          github.com/vladikamira/nestwifi-exporter:latest
-          github.com/vladikamira/nestwifi-exporter:${{ github.ref_name }}
-
-    - name: Build and push rebooter
-      uses: docker/build-push-action@v7
-      with:
-        context: .
-        push: true
-        platforms: linux/amd64,linux/arm64
-        target: rebooter
-        tags: |
-          github.com/vladikamira/nestwifi-rebooter:latest
-          github.com/vladikamira/nestwifi-rebooter:${{ github.ref_name }}
-
-    - name: Create Release
-      uses: softprops/action-gh-release@v2
-      with:
-        generate_release_notes: true
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
