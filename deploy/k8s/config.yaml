@@ -59,3 +59,7 @@ rebooter:
   speedtest_delay: 10m
   # Clients Home Assistant may pause/prioritize (exact Google Home names or IDs).
   managed_clients: []
+  # A scheduled run whose preflight fails (e.g. a transient Google cloud error;
+  # nothing has been changed yet) is retried this many times at this interval.
+  preflight_retries: 6
+  preflight_retry_interval: 5m

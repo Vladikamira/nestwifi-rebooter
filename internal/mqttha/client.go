@@ -23,6 +23,7 @@ type Client struct {
 	cfg    config.MQTT
 	paho   paho.Client
 	status string // availability topic
+	done   chan struct{}
 
 	mu        sync.Mutex
 	onConnect []func()
@@ -80,10 +81,13 @@ func Connect(c config.MQTT, binary string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &Client{cfg: c, status: c.TopicPrefix + "/" + binary + "/status", subs: map[string]func([]byte){}}
+	m := &Client{cfg: c, status: c.TopicPrefix + "/" + binary + "/status", subs: map[string]func([]byte){}, done: make(chan struct{})}
 	id := c.ClientID
 	if id == "" {
-		id = "nestwifi-" + binary
+		// Unique per pod: two pods with one client ID (e.g. during a rollout)
+		// would keep disconnecting each other.
+		host, _ := os.Hostname()
+		id = ID("nestwifi", binary, host)
 	}
 	opts := paho.NewClientOptions().AddBroker(c.URL).SetClientID(id).
 		SetUsername(c.Username).SetPassword(pw).SetTLSConfig(t).
@@ -103,6 +107,20 @@ func Connect(c config.MQTT, binary string) (*Client, error) {
 			}
 			slog.Warn("MQTT connect failed; retrying", "broker", c.URL, "error", t.Error(), "in", wait)
 			time.Sleep(wait)
+		}
+	}()
+	// Re-assert availability: a previous pod exiting during a rollout may
+	// have published "offline" after this one announced "online".
+	go func() {
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-m.done:
+				return
+			case <-t.C:
+				m.publishRaw(m.status, true, []byte("online"))
+			}
 		}
 	}()
 	return m, nil
@@ -206,6 +224,7 @@ func (m *Client) Discover(d Device) {
 
 // Close marks the process offline and disconnects.
 func (m *Client) Close() {
+	close(m.done)
 	if m.paho.IsConnectionOpen() {
 		m.paho.Publish(m.status, 1, true, "offline").WaitTimeout(2 * time.Second)
 	}

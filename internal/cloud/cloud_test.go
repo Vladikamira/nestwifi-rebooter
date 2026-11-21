@@ -289,3 +289,30 @@ func TestTelemetryAggregatesWithoutPrivateData(t *testing.T) {
 		t.Fatalf("%+v", ap)
 	}
 }
+
+func TestNetworkCauseWithoutURL(t *testing.T) {
+	authEnv(t)
+	m := New("")
+	m.authHTTP = &http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) { return response(200, "Auth=access\n"), nil })}
+	m.apiHTTP = &http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("dial tcp: lookup googlehomefoyer-pa.googleapis.com: i/o timeout")
+	})}
+	_, err := m.Groups(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "i/o timeout") || strings.Contains(err.Error(), "https://") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestGraphFallsBackToCacheUnlessForced(t *testing.T) {
+	m := New("")
+	m.graph = []GraphDevice{{ID: "cached"}}
+	m.graphExpires = time.Now().Add(-time.Minute) // expired: refresh is attempted
+	authEnv(t)
+	m.authHTTP = &http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("offline") })}
+	if g, err := m.Graph(context.Background(), false); err != nil || len(g) != 1 {
+		t.Fatal("telemetry should use the cached graph", err)
+	}
+	if _, err := m.Graph(context.Background(), true); err == nil {
+		t.Fatal("forced refresh must fail without the cloud")
+	}
+}

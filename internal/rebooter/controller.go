@@ -198,6 +198,7 @@ func (c *Controller) announce() {
 			CommandTopic: m.Topic("rebooter/schedule/set"), ValueTemplate: "{{ 'ON' if value_json.schedule else 'OFF' }}",
 			PayloadOn: "ON", PayloadOff: "OFF", Icon: "mdi:calendar-clock"},
 		"result":       mqttha.Sensor(network+"_reboot_result", "Last reboot result", "{{ value_json.last_result }}").WithIcon("mdi:restart"),
+		"error":        mqttha.Sensor(network+"_reboot_error", "Last reboot problem", "{{ value_json.last_error }}").WithIcon("mdi:alert-circle-outline").Diagnostic(),
 		"last_success": mqttha.Sensor(network+"_reboot_last_success", "Last successful reboot", "{{ value_json.last_success }}").Class("timestamp", "", ""),
 		"next_run":     mqttha.Sensor(network+"_reboot_next", "Next scheduled reboot", "{{ value_json.next_run }}").Class("timestamp", "", ""),
 		"active":       mqttha.Binary(network+"_reboot_active", "Reboot in progress", "active", "running"),
@@ -302,7 +303,7 @@ func (c *Controller) publishState() {
 	st := c.runner.Status()
 	c.mu.Lock()
 	state := map[string]any{"schedule": st.Schedule, "active": st.Active, "restore_pending": st.RestorePending,
-		"enabled": st.Enabled, "last_result": st.LastResult}
+		"enabled": st.Enabled, "last_result": st.LastResult, "last_error": st.LastError}
 	stamp := func(key string, t time.Time) {
 		if !t.IsZero() {
 			state[key] = t.UTC().Format(time.RFC3339)

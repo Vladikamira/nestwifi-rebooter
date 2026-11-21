@@ -68,15 +68,24 @@ func (s *Scanner) get(ctx context.Context, url, token string, timeout time.Durat
 // Probe identifies a Nest/Google Wifi router (root or leaf) or a Nest Wifi
 // Point speaker using read-only endpoints that do not require authorization.
 func (s *Scanner) Probe(ctx context.Context, ip string) (config.Device, bool) {
+	return s.probe(ctx, ip, s.Config.Timeout)
+}
+
+// Reprobe is Probe with a longer timeout, for addresses known to host a device.
+func (s *Scanner) Reprobe(ctx context.Context, ip string) (config.Device, bool) {
+	return s.probe(ctx, ip, identityTimeout)
+}
+
+func (s *Scanner) probe(ctx context.Context, ip string, timeout time.Duration) (config.Device, bool) {
 	host := net.JoinHostPort(ip, "80")
-	if raw := s.get(ctx, "http://"+host+"/api/v1/status", "", s.Config.Timeout); raw != nil {
+	if raw := s.get(ctx, "http://"+host+"/api/v1/status", "", timeout); raw != nil {
 		system := object(raw, "system")
 		hw := text(system, "hardwareId")
 		if model := text(system, "modelId"); (model == "MISTRAL" || model == "GALE") && hw != "" {
 			return config.Device{Name: "router-" + strings.ReplaceAll(ip, ".", "-"), IP: ip, Kind: "router", LocalID: hw}, true
 		}
 	}
-	raw := s.get(ctx, "https://"+net.JoinHostPort(ip, "8443")+"/setup/eureka_info?params=name,device_info", "", s.Config.Timeout)
+	raw := s.get(ctx, "https://"+net.JoinHostPort(ip, "8443")+"/setup/eureka_info?params=name,device_info", "", timeout)
 	info := object(raw, "device_info")
 	id, name := text(info, "cloud_device_id"), text(raw, "name")
 	if text(info, "model_name") != "Nest Wifi point" || id == "" || name == "" {

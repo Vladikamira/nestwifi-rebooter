@@ -215,11 +215,18 @@ func (c *Collector) collect(ctx context.Context) {
 			return a.Key() == b.Key() || a.CloudID != "" && a.CloudID == b.CloudID
 		}
 		for _, found := range result.Devices {
-			i := slices.IndexFunc(c.devices, func(d config.Device) bool { return same(d, found) })
-			switch {
-			case i >= 0:
-				c.devices[i] = found
-			case len(c.devices) < 1024:
+			// Replace every entry for this device, including a placeholder
+			// (ip="") added while it was missing, so no stale series remains.
+			c.devices = slices.DeleteFunc(c.devices, func(d config.Device) bool {
+				if !same(d, found) {
+					return false
+				}
+				if d.Key() != found.Key() {
+					delete(c.records, d.Key())
+				}
+				return true
+			})
+			if len(c.devices) < 1024 {
 				c.devices = append(c.devices, found)
 			}
 		}

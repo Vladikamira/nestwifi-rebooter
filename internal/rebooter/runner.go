@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -56,6 +57,7 @@ type Status struct {
 	Schedule       bool      `json:"schedule"`
 	LastResult     string    `json:"last_result,omitempty"` // success, failed, dry_run, too_soon, …
 	LastResultAt   time.Time `json:"last_result_at,omitzero"`
+	LastError      string    `json:"last_error,omitempty"` // why the last job did not succeed
 	LastAttempt    time.Time `json:"last_attempt,omitzero"`
 	LastSuccess    time.Time `json:"last_success,omitzero"`
 	NextRun        time.Time `json:"next_run,omitzero"`
@@ -79,9 +81,19 @@ func (r *Runner) OnChange(f func(Status)) { r.statusMu.Lock(); r.onChange = f; r
 // AfterSuccess registers work to run after a confirmed network reboot.
 func (r *Runner) AfterSuccess(f func(context.Context)) { r.afterSuccess = f }
 
-func (r *Runner) result(outcome string) {
+// errPreflight marks failures before anything was changed, so retrying is safe.
+var errPreflight = errors.New("preflight failed")
+
+func (r *Runner) result(outcome string, err error) {
 	r.jobs.WithLabelValues(outcome).Inc()
-	r.update(func(s *Status) { s.LastResult, s.LastResultAt = outcome, time.Now() })
+	msg := ""
+	if err != nil {
+		if msg = err.Error(); len(msg) > 250 {
+			msg = msg[:250] + "…" // HA state values are limited to 255 characters
+		}
+		slog.Warn("job did not succeed", "outcome", outcome, "error", msg)
+	}
+	r.update(func(s *Status) { s.LastResult, s.LastResultAt, s.LastError = outcome, time.Now(), msg })
 }
 
 func (r *Runner) setActive(on bool) {
@@ -113,13 +125,25 @@ func (r *Runner) SetSchedule(on bool) error {
 // SetNextRun records the next cron time for display.
 func (r *Runner) SetNextRun(t time.Time) { r.update(func(s *Status) { s.NextRun = t }) }
 
-// Scheduled is the cron entry point: it honours the schedule switch.
+// Scheduled is the cron entry point: it honours the schedule switch and
+// retries failed preflights (nothing was changed yet), e.g. after a transient
+// Google cloud error, so one hiccup does not skip the reboot for a whole day.
 func (r *Runner) Scheduled(ctx context.Context) error {
 	if !r.Status().Schedule {
 		slog.Info("scheduled reboot skipped: schedule switched off")
 		return nil
 	}
-	return r.Run(ctx)
+	retries, wait := r.c.Rebooter.PreflightRetries, r.c.Rebooter.PreflightRetryInterval
+	for attempt := 0; ; attempt++ {
+		err := r.Run(ctx)
+		if err == nil || !errors.Is(err, errPreflight) || attempt >= retries {
+			return err
+		}
+		slog.Info("scheduled reboot preflight failed; will retry", "attempt", attempt+1, "of", retries+1, "in", wait)
+		if err := sleep(ctx, wait); err != nil {
+			return err
+		}
+	}
 }
 
 func New(c config.Config, store *Store, cloud Cloud, local Local, enabled bool, registry *prometheus.Registry) *Runner {
@@ -182,7 +206,11 @@ func (r *Runner) prepare(ctx context.Context, apID string) (*State, error) {
 	if r.discovery != nil {
 		result, err := r.discovery.Discover(ctx, true)
 		if err != nil || !result.Complete {
-			return nil, errors.New("discovery incomplete or cloud identities not uniquely matched; reboot prohibited")
+			reason := strings.Join(result.Problems, "; ")
+			if reason == "" && err != nil {
+				reason = err.Error()
+			}
+			return nil, fmt.Errorf("inventory incomplete (%d/%d matched): %s; reboot prohibited", result.Matched, result.Expected, reason)
 		}
 		devices = result.Devices
 	}
@@ -390,8 +418,9 @@ func (r *Runner) RebootAP(ctx context.Context, apID string) error {
 
 func (r *Runner) run(ctx context.Context, apID string) error {
 	if !r.mu.TryLock() {
-		r.result("skipped_busy")
-		return errors.New("operation already active")
+		err := errors.New("another operation is running")
+		r.result("skipped_busy", err)
+		return err
 	}
 	defer r.mu.Unlock()
 	r.setActive(true)
@@ -406,17 +435,18 @@ func (r *Runner) run(ctx context.Context, apID string) error {
 		return r.recoverLocked(ctx, previous)
 	}
 	if previous != nil && previous.APID == apID && time.Since(previous.Submitted) < r.c.Rebooter.MinInterval {
-		r.result("too_soon")
-		return fmt.Errorf("last reboot of this target was %s ago; minimum interval is %s",
+		err := fmt.Errorf("last reboot of this target was %s ago; minimum interval is %s",
 			time.Since(previous.Submitted).Round(time.Minute), r.c.Rebooter.MinInterval)
+		r.result("too_soon", err)
+		return err
 	}
 	s, err := r.prepare(ctx, apID)
 	if err != nil {
-		r.result("preflight_failed")
-		return err
+		r.result("preflight_failed", err)
+		return fmt.Errorf("%w: %w", errPreflight, err)
 	}
 	if !r.enabled {
-		r.result("dry_run")
+		r.result("dry_run", nil)
 		slog.Info("dry run: preflight passed; no settings changed and no reboot sent")
 		return nil
 	}
@@ -439,8 +469,9 @@ func (r *Runner) run(ctx context.Context, apID string) error {
 		cancel()
 		if err != nil {
 			s.Outcome = "failed"
-			r.result("quiet_failed")
-			return errors.Join(fmt.Errorf("quiet %s failed; reboot NOT sent: %w", e.Device.Name, err), r.restore(ctx, s))
+			err = fmt.Errorf("quiet %s failed; reboot NOT sent: %w", e.Device.Name, err)
+			r.result("quiet_failed", err)
+			return errors.Join(err, r.restore(ctx, s))
 		}
 	}
 	// Verify every Point again after all mutations, before the irreversible command.
@@ -459,8 +490,9 @@ func (r *Runner) run(ctx context.Context, apID string) error {
 			snapshot.Volume != nil && snapshot.Volume.Level <= 0.001
 		if !quiet {
 			s.Outcome = "failed"
-			r.result("quiet_failed")
-			return errors.Join(errors.New("quiet verification failed; reboot NOT sent"), r.restore(ctx, s))
+			err := fmt.Errorf("quiet mode of %s not confirmed; reboot NOT sent", e.Device.Name)
+			r.result("quiet_failed", err)
+			return errors.Join(err, r.restore(ctx, s))
 		}
 	}
 	s.Stage = "reboot_intent"
@@ -495,11 +527,11 @@ func (r *Runner) run(ctx context.Context, apID string) error {
 		slog.Warn("boot confirmation incomplete", "error", bootErr)
 	}
 	restoreErr := r.restore(ctx, s)
-	if bootErr != nil || restoreErr != nil {
-		r.result("failed")
-		return errors.Join(bootErr, restoreErr)
+	if err := errors.Join(bootErr, restoreErr); err != nil {
+		r.result("failed", err)
+		return err
 	}
-	r.result("success")
+	r.result("success", nil)
 	slog.Info("reboot confirmed; all original settings restored", "access_point", apID)
 	if apID == "" && r.afterSuccess != nil {
 		go r.afterSuccess(ctx)

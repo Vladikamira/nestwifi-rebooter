@@ -99,3 +99,28 @@ func TestDiscoveryRetainsMissingDevicesForDownMetrics(t *testing.T) {
 		t.Fatal("IP/name change duplicated stable device")
 	}
 }
+
+type missingSource struct{ result discovery.Result }
+
+func (m *missingSource) Discover(context.Context, bool) (discovery.Result, error) {
+	return m.result, nil
+}
+
+func TestPlaceholderReplacedWhenDeviceReturns(t *testing.T) {
+	var cfg config.Config
+	cfg.Exporter.Concurrency, cfg.Exporter.Timeout = 1, time.Second
+	c := New(cfg, &dynamicInspector{online: true})
+	point := config.Device{Name: "kitchen-wifi", IP: "192.168.86.32", Kind: "wifi_point", LocalID: "local", CloudID: "g"}
+	src := &missingSource{}
+	c.SetDiscovery(src)
+	// Seen once without cloud identity, then missing, then found again.
+	src.result = discovery.Result{Devices: []config.Device{{Name: "point-x", IP: point.IP, Kind: "wifi_point", LocalID: "local"}}}
+	c.collect(context.Background())
+	src.result = discovery.Result{Missing: []config.Device{{Name: "kitchen-wifi", Kind: "wifi_point", CloudID: "g"}}}
+	c.collect(context.Background())
+	src.result = discovery.Result{Devices: []config.Device{point}}
+	c.collect(context.Background())
+	if len(c.devices) != 1 || c.devices[0].IP != point.IP || len(c.records) != 1 {
+		t.Fatalf("stale entries remain: %+v records=%d", c.devices, len(c.records))
+	}
+}

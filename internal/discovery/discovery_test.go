@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -156,14 +157,19 @@ func TestScanCancellation(t *testing.T) {
 }
 
 type fakeGraph struct {
-	graph []cloud.GraphDevice
-	err   error
+	graph  []cloud.GraphDevice
+	err    error
+	forced []bool
 }
 
-func (g *fakeGraph) Graph(context.Context, bool) ([]cloud.GraphDevice, error) { return g.graph, g.err }
+func (g *fakeGraph) Graph(_ context.Context, force bool) ([]cloud.GraphDevice, error) {
+	g.forced = append(g.forced, force)
+	return g.graph, g.err
+}
 
 type fakeProber struct {
 	found []config.Device
+	slow  map[string]config.Device // answer only to the slower Reprobe
 	scans int
 }
 
@@ -171,14 +177,64 @@ func (p *fakeProber) Scan(context.Context) ([]config.Device, error) {
 	p.scans++
 	return append([]config.Device(nil), p.found...), nil
 }
+func (p *fakeProber) Reprobe(_ context.Context, ip string) (config.Device, bool) {
+	d, ok := p.slow[ip]
+	return d, ok
+}
 func (p *fakeProber) Accepts(ctx context.Context, ip, token string) bool {
 	return accepts(ctx, ip, token)
+}
+
+func newResolver(g Graph, p Prober) *Resolver {
+	return &Resolver{interval: time.Minute, graph: g, prober: p, known: map[string]bool{}}
+}
+
+func TestSlowPointFoundByReprobe(t *testing.T) {
+	found, graph := fixture()
+	p := &fakeProber{found: found}
+	r := newResolver(&fakeGraph{graph: graph}, p)
+	if res, _ := r.Discover(context.Background(), true); !res.Complete {
+		t.Fatal("first scan incomplete")
+	}
+	// The kitchen Point misses the fast scan but answers a slower probe.
+	kitchen := found[3]
+	p.found = append(found[:3:3], found[4])
+	p.slow = map[string]config.Device{kitchen.IP: kitchen}
+	if res, err := r.Discover(context.Background(), true); err != nil || !res.Complete {
+		t.Fatalf("known device not re-probed: %+v %v", res, err)
+	}
+}
+
+func TestProblemsExplainIncompleteInventory(t *testing.T) {
+	found, graph := fixture()
+	r := newResolver(&fakeGraph{graph: graph}, &fakeProber{found: found[1:]})
+	res, _ := r.Discover(context.Background(), true)
+	if res.Complete || !slices.Contains(res.Problems, "Living Room Wifi: not found on the LAN") {
+		t.Fatalf("%+v", res.Problems)
+	}
+	g := &fakeGraph{err: errors.New("GetHomeGraph failed: Unavailable: x")}
+	res, _ = newResolver(g, &fakeProber{found: found}).Discover(context.Background(), true)
+	if !slices.ContainsFunc(res.Problems, func(s string) bool { return strings.Contains(s, "Unavailable") }) {
+		t.Fatalf("cloud reason missing: %+v", res.Problems)
+	}
+}
+
+func TestOnlyForcedDiscoveryForcesHomeGraph(t *testing.T) {
+	found, graph := fixture()
+	g := &fakeGraph{graph: graph}
+	r := newResolver(g, &fakeProber{found: found})
+	r.interval = 0 // rescan on every call
+	_, _ = r.Discover(context.Background(), false)
+	_, _ = r.Discover(context.Background(), true)
+	if !slices.Equal(g.forced, []bool{false, true}) {
+		t.Fatalf("HomeGraph force flags %v", g.forced)
+	}
 }
 
 func TestResolverCachingAndCloudFailure(t *testing.T) {
 	found, graph := fixture()
 	g, p := &fakeGraph{graph: graph}, &fakeProber{found: found}
-	r := &Resolver{interval: time.Minute, graph: g, prober: p}
+	r := newResolver(g, p)
 	for range 2 {
 		if res, err := r.Discover(context.Background(), false); err != nil || !res.Complete {
 			t.Fatal("resolve failed", err)

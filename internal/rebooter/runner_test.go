@@ -65,10 +65,17 @@ type fakeCloud struct {
 	apCalls          int
 	err              error
 	preflightErr     error
+	failChecks       int
 	doBoot           bool
 }
 
-func (c *fakeCloud) CheckGroup(context.Context, string, []string) error { return c.preflightErr }
+func (c *fakeCloud) CheckGroup(context.Context, string, []string) error {
+	if c.failChecks > 0 {
+		c.failChecks--
+		return errors.New("transient cloud error")
+	}
+	return c.preflightErr
+}
 
 // Test AP IDs: "ap-<device name>"; IPs as in fixture.
 var fakeAPs = map[string][2]string{"ap-kitchen": {"192.0.2.2", "kitchen"}, "ap-router": {"192.0.2.1", "router"}}
@@ -507,5 +514,59 @@ func TestAfterSuccessHookAndStatus(t *testing.T) {
 	defer mu.Unlock()
 	if !slices.ContainsFunc(seen, func(s Status) bool { return s.Active }) {
 		t.Fatal("active state never reported")
+	}
+}
+
+func TestScheduledRetriesTransientPreflight(t *testing.T) {
+	r, c, l := fixture(t, true)
+	r.c.Rebooter.PreflightRetries, r.c.Rebooter.PreflightRetryInterval = 3, time.Millisecond
+	c.failChecks = 2
+	if err := r.Scheduled(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if c.calls != 1 || r.Status().LastResult != "success" || r.Status().LastError != "" {
+		t.Fatalf("calls=%d status=%+v", c.calls, r.Status())
+	}
+	assertRestored(t, r, l)
+}
+
+func TestScheduledGivesUpWithReason(t *testing.T) {
+	r, c, l := fixture(t, true)
+	r.c.Rebooter.PreflightRetries, r.c.Rebooter.PreflightRetryInterval = 2, time.Millisecond
+	c.failChecks = 10
+	err := r.Scheduled(context.Background())
+	if err == nil || c.calls != 0 || l.writes != 0 || c.failChecks != 7 {
+		t.Fatalf("err=%v calls=%d writes=%d remaining=%d", err, c.calls, l.writes, c.failChecks)
+	}
+	if st := r.Status(); st.LastResult != "preflight_failed" || !strings.Contains(st.LastError, "transient cloud error") {
+		t.Fatalf("%+v", st)
+	}
+}
+
+func TestNoRetryAfterDevicesChanged(t *testing.T) {
+	r, c, l := fixture(t, true)
+	r.c.Rebooter.PreflightRetries, r.c.Rebooter.PreflightRetryInterval = 3, time.Millisecond
+	l.failQuiet = "office"
+	if r.Scheduled(context.Background()) == nil {
+		t.Fatal("expected quiet failure")
+	}
+	if c.calls != 0 || r.Status().LastResult != "quiet_failed" {
+		t.Fatal("must not retry or reboot once settings were touched")
+	}
+	assertRestored(t, r, l)
+}
+
+type incompleteDiscovery struct{}
+
+func (incompleteDiscovery) Discover(context.Context, bool) (discovery.Result, error) {
+	return discovery.Result{Expected: 5, Matched: 4, Problems: []string{"Kitchen Wifi: not found on the LAN"}}, nil
+}
+
+func TestPreflightReasonNamesMissingDevice(t *testing.T) {
+	r, _, _ := fixture(t, true)
+	r.SetDiscovery(incompleteDiscovery{})
+	err := r.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "4/5 matched") || !strings.Contains(r.Status().LastError, "Kitchen Wifi: not found") {
+		t.Fatalf("%v / %+v", err, r.Status())
 	}
 }

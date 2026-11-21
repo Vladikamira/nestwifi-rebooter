@@ -90,6 +90,10 @@ type Config struct {
 		// Clients (exact Google Home names or station IDs) that Home Assistant may
 		// pause or prioritize. Empty: no client controls are exposed.
 		ManagedClients []string `yaml:"managed_clients"`
+		// Scheduled runs retry a failed preflight (nothing changed yet) this many
+		// times, every PreflightRetryInterval.
+		PreflightRetries       int           `yaml:"preflight_retries"`
+		PreflightRetryInterval time.Duration `yaml:"preflight_retry_interval"`
 	} `yaml:"rebooter"`
 }
 
@@ -114,6 +118,8 @@ func Load(path string) (Config, error) {
 	c.Rebooter.RecoveryInterval = time.Minute
 	c.Rebooter.MinInterval = time.Hour
 	c.Rebooter.SpeedtestDelay = 10 * time.Minute
+	c.Rebooter.PreflightRetries = 6
+	c.Rebooter.PreflightRetryInterval = 5 * time.Minute
 	c.MQTT.TopicPrefix = "nestwifi"
 	c.MQTT.DiscoveryPrefix = "homeassistant"
 	f, err := os.Open(path)
@@ -178,7 +184,8 @@ func Load(path string) (Config, error) {
 	}
 	r := c.Rebooter
 	if r.WaitTimeout <= 0 || r.PollInterval <= 0 || r.Settle < 0 || r.QuietSettle < 0 || r.RecoveryInterval <= 0 || r.StateDir == "" ||
-		r.MinInterval < 10*time.Minute || r.SpeedtestDelay < 0 {
+		r.MinInterval < 10*time.Minute || r.SpeedtestDelay < 0 ||
+		r.PreflightRetries < 0 || r.PreflightRetries > 24 || r.PreflightRetryInterval < time.Minute {
 		return c, errors.New("invalid rebooter timing/state directory (min_interval is at least 10m)")
 	}
 	if m := c.MQTT; m.URL != "" {

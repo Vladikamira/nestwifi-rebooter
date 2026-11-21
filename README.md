@@ -131,6 +131,25 @@ Additionally, the rebooter supports (including via buttons in Home Assistant):
 (whole network or a specific point), including presses in HA. Rejection shows up
 as `last_result=too_soon`.
 
+**Preflight retries.** The Google cloud is occasionally unavailable or rate-limits
+requests, and a Point sometimes answers the LAN scan slowly. A *scheduled* run
+whose preflight fails — before anything is changed — is retried
+`preflight_retries` times (default 6) every `preflight_retry_interval` (default
+5 min). Failures after the speakers were quieted are never retried. A button
+press in HA is a single attempt.
+
+**Why a reboot did not happen** is logged and published: `last_result`
+(`preflight_failed`, `too_soon`, `quiet_failed`, `failed`, …) plus `last_error`
+in plain words, e.g. `inventory incomplete (4/5 matched): Kitchen Wifi: not found
+on the LAN` or `GetHomeGraph failed: Unavailable: …`. Network causes such as
+`i/o timeout` or `no such host` are included; tokens and request URLs are not.
+In HA it is the "Last reboot problem" diagnostic sensor.
+
+Discovery re-probes, with a 5 s timeout, addresses where a Wifi device answered
+before but missed the fast 1.5 s scan. Telemetry uses a cached HomeGraph (refreshed
+at most every 10 minutes, and kept when a refresh fails); the rebooter always
+fetches it fresh before changing anything.
+
 ## Home Assistant via MQTT
 
 Requires an MQTT broker and the MQTT integration in HA (**HA 2024.11+**: whole-device
@@ -182,7 +201,10 @@ kubectl -n nestwifi create secret generic nestwifi-mqtt \
 needed. `insecure_skip_verify` is for debugging only.
 
 Broker connection errors are logged with retries (5 s … 1 min); after the first
-connection, reconnection is automatic.
+connection, reconnection is automatic. The default MQTT client ID includes the pod
+name (two clients with one ID keep disconnecting each other), and each process
+re-asserts `online` every minute. The exporter Deployment uses the `Recreate`
+strategy, so only one instance publishes and polls the cloud at a time.
 
 ### Google Quota
 

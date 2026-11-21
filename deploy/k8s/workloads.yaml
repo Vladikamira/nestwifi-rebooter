@@ -4,6 +4,10 @@ metadata:
   name: nestwifi-exporter
 spec:
   replicas: 1
+  # One instance at a time: avoids duplicate MQTT publishers and doubled
+  # Google cloud polling during rollouts.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: nestwifi-exporter

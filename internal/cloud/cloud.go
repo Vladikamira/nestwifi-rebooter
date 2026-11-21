@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -127,7 +128,7 @@ func (m *Manager) accessLocked(ctx context.Context, force bool) (string, error) 
 	req.Header.Set("Accept-Encoding", "identity")
 	resp, err := m.authHTTP.Do(req)
 	if err != nil {
-		return "", errors.New("Google authentication connection failed")
+		return "", fmt.Errorf("Google authentication connection failed: %w", netCause(err))
 	}
 	defer resp.Body.Close()
 
@@ -266,7 +267,9 @@ func (m *Manager) graphLocked(ctx context.Context, force bool) error {
 			}
 		}
 		if err != nil {
-			return errors.New("GetHomeGraph failed")
+			// gRPC code and message carry no credentials (e.g. Unavailable, ResourceExhausted).
+			s := status.Convert(err)
+			return fmt.Errorf("GetHomeGraph failed: %s: %.120s", s.Code(), s.Message())
 		}
 		graph, err := parseGraph(data)
 		if err != nil {
@@ -281,12 +284,28 @@ func (m *Manager) graphLocked(ctx context.Context, force bool) error {
 	return nil
 }
 
+// netCause strips the request (method, URL) from a transport error and keeps
+// the network reason, e.g. "i/o timeout" or "no such host". Neither the URL
+// nor the reason contains credentials, but the URL is not useful in logs.
+func netCause(err error) error {
+	var u *url.Error
+	if errors.As(err, &u) {
+		return u.Err
+	}
+	return err
+}
+
 // Graph is for internal inventory reconciliation. Its tokens must not be logged.
+// With force=false a failed refresh falls back to the cached graph (if any),
+// which is fine for telemetry; callers that change devices pass force=true.
 func (m *Manager) Graph(ctx context.Context, force bool) ([]GraphDevice, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.graphLocked(ctx, force); err != nil {
-		return nil, err
+		if force || len(m.graph) == 0 {
+			return nil, err
+		}
+		slog.Warn("HomeGraph refresh failed; using cached inventory", "error", err)
 	}
 	var out []GraphDevice
 	for _, d := range m.graph {
@@ -381,7 +400,7 @@ func (m *Manager) rest(ctx context.Context, method, path string, payload ...any)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := m.apiHTTP.Do(req)
 	if err != nil {
-		return nil, 0, errors.New("cloud connection failed; command acceptance may be unknown")
+		return nil, 0, fmt.Errorf("cloud connection failed (command acceptance may be unknown): %w", netCause(err))
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
